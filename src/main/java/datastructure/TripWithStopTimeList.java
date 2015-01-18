@@ -21,6 +21,10 @@ public class TripWithStopTimeList implements Comparable<TripWithStopTimeList> {
 	private int startTime;
 	private int endTime;
 	private ArrayList<StopTime> stopTimeList;
+	
+	public TripWithStopTimeList() {
+		
+	}
 
 	public TripWithStopTimeList(Trip trip, int startTime, int endTime,
 			ArrayList<StopTime> stopTimeList) {
@@ -48,6 +52,14 @@ public class TripWithStopTimeList implements Comparable<TripWithStopTimeList> {
 
 	public void setTrip(Trip trip) {
 		this.trip = trip;
+	}
+		
+	public void setStartTime(int startTime) {
+		this.startTime = startTime;
+	}
+
+	public void setEndTime(int endTime) {
+		this.endTime = endTime;
 	}
 
 	public ArrayList<StopTime> getStopTimeList() {

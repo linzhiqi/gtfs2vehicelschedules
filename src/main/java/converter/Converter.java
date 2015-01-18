@@ -11,6 +11,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 
 import movement.schedule.RouteSchedule;
 import movement.schedule.StopDataUnit;
@@ -44,6 +45,7 @@ import joptsimple.OptionSet;
  */
 public class Converter {
 
+	// routes other than these 4 types will be excluded
 	public static final int TRAM_TYPE = 0;
 	public static final int METRO_TYPE = 1;
 	public static final int RAIL_TYPE = 2;
@@ -60,25 +62,40 @@ public class Converter {
 	 */
 	public static double DISTANCE_MAX = 500;
 
-	public static String OUTPUT_PATH = "vehicle_schedules.json";
+	public static final String SCHEDULE_FILE_NAME = "schedules.json";
+	public static final String STOP_FILE_NAME = "stops.json";
+
+	public static double[] boundaries;
 
 	public enum Weekday {
 		Mon, Tue, Wed, Thu, Fri, Sat, Sun
 	};
 
 	public static void main(String[] args) throws IOException {
-		String usageStr = "usage: <-i gtfs_path> [-o output_path] [-s max_speed] [-d max_distance]";
+		String usageStr = "usage: <-i gtfs_path> <-b xmin,ymin,xmax,ymax> [-s max_speed] [-d max_distance]";
 		String inputPath = null;
-		OptionParser parser = new OptionParser("i:o:s:d:h");
+		OptionParser parser = new OptionParser("i:b:s:d:h");
 		OptionSet options = parser.parse(args);
 		if (!options.has("i")) {
 			System.out.print(usageStr);
 			System.exit(-1);
 		}
-		inputPath = (String) options.valueOf("i");
-		if (options.has("o")) {
-			OUTPUT_PATH = (String) options.valueOf("o");
+		if (!options.has("b")) {
+			System.out.print(usageStr);
+			System.exit(-1);
 		}
+		inputPath = (String) options.valueOf("i");
+		String boundStr = (String) options.valueOf("b");
+		String[] bounds = boundStr.split(",");
+		if (bounds.length != 4) {
+			System.out.print(usageStr);
+			System.exit(-1);
+		}
+		boundaries = new double[4];
+		for (int i = 0; i < 4; i++) {
+			boundaries[i] = Double.valueOf(bounds[i]);
+		}
+
 		if (options.has("s")) {
 			SPEED_MAX = Double.parseDouble((String) options.valueOf("s"));
 		}
@@ -148,16 +165,223 @@ public class Converter {
 		populateRouteScheduleList(routesWithTripList, route2IntIdMap,
 				routeSchedules);
 
-		// convert to JSON file
-		writeToJSONFile(routeSchedules, OUTPUT_PATH);
+		// build stopId -> stopLoc HashMap
+		Collection<Stop> stops = store.getAllStops();
+		HashMap<String, Coord> stopMap = new HashMap<String, Coord>();
+		buildStopMap(stops, stopMap);
+		// deal with schedules out of the given location boundaries
+		constrainOutOfBound(boundaries, stopMap, routeSchedules);
+		// exclude stops out of boundaries
+		excludeOutBoundStop(boundaries, stopMap);
+		
+		// convert vehicle schedules to JSON file
+		writeToJSONFile(routeSchedules, SCHEDULE_FILE_NAME);
+		// convert stop list to JSON file
+		writeToJSONFile(stopMap, STOP_FILE_NAME);
 	}
 
-	public static void writeToJSONFile(ArrayList<RouteSchedule> routeSchedules,
+	public static void excludeOutBoundStop(double[] boundaries,
+			HashMap<String, Coord> stopMap) {
+		Set<String> stopIds = stopMap.keySet();
+		Iterator<String> it = stopIds.iterator();
+		int num = stopIds.size();	
+		while (it.hasNext()) {
+			String id = it.next();
+			Coord c = stopMap.get(id);
+			if (!isCoordInBound(c.getX(), c.getY(), boundaries)){
+				it.remove();
+			}
+		}
+		
+		System.out.println("within_boundary_stop_num/original_number: "+stopIds.size()+" / "+num);
+	}
+
+	/**
+	 * build the stopMap so given a stop id, the stop location can be returned.
+	 * 
+	 * @param stops
+	 *            all stops's info
+	 * @param stopMap
+	 *            the map to build
+	 */
+	public static void buildStopMap(Collection<Stop> stops,
+			HashMap<String, Coord> stopMap) {
+		Iterator<Stop> it = stops.iterator();
+		while (it.hasNext()) {
+			Stop stop = it.next();
+			Coord loc = new Coord(stop.getLon(), stop.getLat());
+			stopMap.put(stop.getId().getId(), loc);
+		}
+	}
+
+	/**
+	 * if in the trip, there is a sequence of stops within boundaries, and the
+	 * number of them >= the half of the total number of stops of this trip, we
+	 * shorten this trip to this stop sequence, with any other stops removed.
+	 * 
+	 * @param boundaries
+	 *            a double array of length 4: [xmin][ymin][xmax][ymax]
+	 * @param stopMap
+	 *            the map provides stop coordinates when stop id is given
+	 * @param routeSchedules
+	 */
+	public static void constrainOutOfBound(double[] boundaries,
+			HashMap<String, Coord> stopMap,
+			ArrayList<RouteSchedule> routeSchedules) {
+		
+		int stopsDeleted = 0, tripsDeleted = 0, vehicleDeleted = 0, routeDeleted = 0;
+		
+		Iterator<RouteSchedule> routeIt = routeSchedules.iterator();
+		while (routeIt.hasNext()) {
+			RouteSchedule route = routeIt.next();
+
+			// if all stops of the route are within boundaries, no need to dig
+			// in
+			if (areStopsInBound(route.stops, stopMap, boundaries)) {
+				continue;
+			}
+
+			Iterator<VehicleSchedule> vehicleIt = route.vehicles.iterator();
+			while (vehicleIt.hasNext()) {
+				VehicleSchedule vehicle = vehicleIt.next();
+
+				Iterator<ArrayList<StopDataUnit>> tripIt = vehicle.trips
+						.iterator();
+				while (tripIt.hasNext()) {
+					ArrayList<StopDataUnit> trip = tripIt.next();
+
+					Iterator<StopDataUnit> stopIt = trip.iterator();
+					int stopIndex = 0;
+					int numOfStop = trip.size();
+
+					// record the in bound stop sequence, and update the stop
+					// list of the route
+					int numOfInBoundStop = 0;
+					int firstInBoundIndex = -1;
+					boolean isFirstInBoundStop = true;
+					boolean answerIsFound = false;
+					while (stopIt.hasNext()) {
+						StopDataUnit stop = stopIt.next();
+						if (isStopInBound(stop.stop_id, stopMap, boundaries)) {
+							if (answerIsFound) {
+								continue;
+							}
+							if (isFirstInBoundStop) {
+								firstInBoundIndex = stopIndex;
+								isFirstInBoundStop = false;
+							}
+							numOfInBoundStop++;
+						} else {
+							// always update the stop list of the route
+							if (route.stops.contains(stop.stop_id)) {
+								route.stops.remove(stop.stop_id);
+							}
+							// when answer is found, do nothing extra, just
+							// traverse later stops and update stop list of the
+							// route.
+							if (answerIsFound) {
+								continue;
+							}
+							// this is when it determine that the trip can be
+							// shorten rather than be deleted
+							if (numOfInBoundStop >= numOfStop / 2) {
+								answerIsFound = true;
+							} else {
+								numOfInBoundStop = 0;
+								firstInBoundIndex = -1;
+								isFirstInBoundStop = true;
+							}
+
+						}
+						stopIndex++;
+					}
+
+					// for the case that the trip is ended at stops within
+					// boundaries
+					if (numOfInBoundStop >= numOfStop / 2) {
+						answerIsFound = true;
+					}
+
+					// remove all the other stops
+					stopIt = trip.iterator();
+					int i = 0;
+					while (stopIt.hasNext()) {
+						stopIt.next();
+						if (!answerIsFound) {
+							stopIt.remove();
+							stopsDeleted ++;
+							continue;
+						}
+						if (i < firstInBoundIndex || i >= i + numOfInBoundStop) {
+							stopIt.remove();
+							stopsDeleted ++;
+						} else {
+							// is within boundaries, do nothing
+						}
+						i++;
+					}
+
+					// remove this trip from the vehicle if it's empty now
+					if (trip.isEmpty()) {
+						tripIt.remove();
+						tripsDeleted ++;
+					}
+				}
+
+				// remove this vehicle from the route if it's empty now
+				if (vehicle.trips.isEmpty()) {
+					vehicleIt.remove();
+					vehicleDeleted ++;
+				}
+			}
+			// remove this route if it has no vehicle
+			if (route.vehicles.isEmpty()) {
+				routeIt.remove();
+				routeDeleted ++;
+			}
+		}
+		System.out.println("\nstopsDeleted="+stopsDeleted+"\ttripsDeleted="+tripsDeleted+"\tvehicleDeleted="+vehicleDeleted+"\trouteDeleted"+routeDeleted);
+	}
+
+	public static boolean areStopsInBound(Set<String> stopsOfRoute,
+			HashMap<String, Coord> stopMap, double[] boundaries) {
+		Iterator<String> it = stopsOfRoute.iterator();
+		while (it.hasNext()) {
+			String id = it.next();
+			if (!isStopInBound(id, stopMap, boundaries)) {
+				return false;
+			}
+		}
+		return false;
+	}
+
+	public static boolean isStopInBound(String stopId,
+			HashMap<String, Coord> stopMap, double[] boundaries) {
+		Coord c = stopMap.get(stopId);
+		double x = c.getX();
+		double y = c.getY();
+		return isCoordInBound(x, y, boundaries);
+	}
+	
+	public static boolean isCoordInBound(double x, double y, double[] boundaries) {
+		double xmin = boundaries[0];
+		double ymin = boundaries[1];
+		double xmax = boundaries[2];
+		double ymax = boundaries[3];
+		//System.out.println("x="+x+" y="+y+" xmin"+xmin+" ymin"+ymin +" xmax"+xmax+" ymax"+ymax);
+		if (x > xmin && x < xmax && y > ymin && y < ymax) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	public static void writeToJSONFile(Object object,
 			String filePath) {
 		ObjectMapper mapper = new ObjectMapper();
 		try {
 			mapper.writerWithDefaultPrettyPrinter().writeValue(
-					new File(filePath), routeSchedules);
+					new File(filePath), object);
 		} catch (JsonGenerationException e) {
 			e.printStackTrace();
 		} catch (JsonMappingException e) {
@@ -216,6 +440,7 @@ public class Converter {
 				vehicle.vehicle_id = numberOfVehicles;
 				Iterator<TripWithStopTimeList> it1 = tripList.iterator();
 				int lastEndTime = 0;
+				int lastStartTime = 0;
 				Coord lastEndLocation = null;
 				while (it1.hasNext()) {
 					TripWithStopTimeList trip = it1.next();
@@ -226,16 +451,20 @@ public class Converter {
 						ArrayList<StopDataUnit> stopDataUniteList = stopTimeList2DataUniteList(stopTimeList);
 						vehicle.trips.add(stopDataUniteList);
 						lastEndTime = trip.getEndTime();
+						lastStartTime = trip.getStartTime();
 						Stop lastEndStop = stopTimeList.get(
 								stopTimeList.size() - 1).getStop();
 						lastEndLocation = new Coord(lastEndStop.getLon(),
 								lastEndStop.getLat());
 						it1.remove();
-						continue;
+
 					} else {
 						// if is not the first trip, check if it is valid to be
 						// the next trip
 						int thisStartTime = trip.getStartTime();
+						if(thisStartTime<lastStartTime) {
+							assert false:"trip sorting error!";
+						}
 						Stop thisStartStop = stopTimeList.get(0).getStop();
 						Coord thisStartLocation = new Coord(
 								thisStartStop.getLon(), thisStartStop.getLat());
@@ -245,14 +474,15 @@ public class Converter {
 							ArrayList<StopDataUnit> stopDataUniteList = stopTimeList2DataUniteList(stopTimeList);
 							vehicle.trips.add(stopDataUniteList);
 							lastEndTime = trip.getEndTime();
+							lastStartTime = trip.getStartTime();
 							Stop lastEndStop = stopTimeList.get(
 									stopTimeList.size() - 1).getStop();
-							lastEndLocation = new Coord(lastEndStop.getLat(),
-									lastEndStop.getLon());
+							lastEndLocation = new Coord(lastEndStop.getLon(),
+									lastEndStop.getLat());
 							it1.remove();
-							continue;
+
 						} else {
-							continue;
+	
 						}
 					}
 				}
@@ -295,9 +525,9 @@ public class Converter {
 				Collections.sort(stopTimeList);
 
 				// build trip element and add to the trip list
-				int startTime = stopTimeList.get(0).getArrivalTime();
+				int startTime = stopTimeList.get(0).getDepartureTime();
 				int endTime = stopTimeList.get(stopTimeList.size() - 1)
-						.getDepartureTime();
+						.getArrivalTime();
 				TripWithStopTimeList tripWithTime = new TripWithStopTimeList(
 						stopTimeList.get(0).getTrip(), startTime, endTime,
 						stopTimeList);
@@ -586,7 +816,7 @@ public class Converter {
 				|| transportType == Converter.TRAM_TYPE) {
 			if (distance > maxDistance) {
 				return false;
-			}
+			} 
 		}
 
 		if ((distance / maxSpeed) > (thisStartTime - lastEndTime)) {
