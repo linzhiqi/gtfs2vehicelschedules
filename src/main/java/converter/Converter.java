@@ -26,14 +26,10 @@ import org.onebusaway.gtfs.model.StopTime;
 import org.onebusaway.gtfs.model.Trip;
 import org.onebusaway.gtfs.serialization.GtfsReader;
 
-import com.fasterxml.jackson.core.JsonGenerationException;
-import com.fasterxml.jackson.databind.JsonMappingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import core.Coord;
 import core.DTNHost;
-import datastructure.RouteWithTripList;
-import datastructure.TripWithStopTimeList;
+
+import util.Coord;
+import util.IOUtil;
 
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
@@ -64,36 +60,57 @@ public class Converter {
 
 	public static final String SCHEDULE_FILE_NAME = "schedules.json";
 	public static final String STOP_FILE_NAME = "stops.json";
-
-	public static double[] boundaries;
+	private static final String WKT_STOP_FILE_NAME = "stops.wkt";
 
 	public enum Weekday {
 		Mon, Tue, Wed, Thu, Fri, Sat, Sun
 	};
 
 	public static void main(String[] args) throws IOException {
-		String usageStr = "usage: <-i gtfs_path> <-b xmin,ymin,xmax,ymax> [-s max_speed] [-d max_distance]";
+		// parsing input options
+		String usageStr = "usage: <-i gtfs_path> <-b xmin,ymin,xmax,ymax> " +
+				"[-s max_speed] [-d max_distance] [-v x_offset,y_offset] ";
 		String inputPath = null;
-		OptionParser parser = new OptionParser("i:b:s:d:h");
+		double[] boundaries = null;
+		double x_offset = 0.0;
+		double y_offset = 0.0;
+		OptionParser parser = new OptionParser("i:b:s:d:v:h");
 		OptionSet options = parser.parse(args);
+		
 		if (!options.has("i")) {
 			System.out.print(usageStr);
 			System.exit(-1);
+		} else {
+			inputPath = (String) options.valueOf("i");
 		}
+		
 		if (!options.has("b")) {
 			System.out.print(usageStr);
 			System.exit(-1);
+		} else {
+			String boundStr = (String) options.valueOf("b");
+			String[] bounds = boundStr.split(",");
+			if (bounds.length != 4) {
+				System.out.print(usageStr);
+				System.exit(-1);
+			} else {
+				boundaries = new double[4];
+				for (int i = 0; i < 4; i++) {
+					boundaries[i] = Double.valueOf(bounds[i]);
+				}
+			}
 		}
-		inputPath = (String) options.valueOf("i");
-		String boundStr = (String) options.valueOf("b");
-		String[] bounds = boundStr.split(",");
-		if (bounds.length != 4) {
-			System.out.print(usageStr);
-			System.exit(-1);
-		}
-		boundaries = new double[4];
-		for (int i = 0; i < 4; i++) {
-			boundaries[i] = Double.valueOf(bounds[i]);
+		
+		if (options.has("v")) {
+			String vector = (String) options.valueOf("v");
+			String[] element = vector.split(",");
+			if (element.length!=2) {
+				System.out.print(usageStr);
+				System.exit(-1);
+			} else {
+				x_offset = Double.valueOf(element[0]);
+				y_offset = Double.valueOf(element[1]);
+			}	
 		}
 
 		if (options.has("s")) {
@@ -107,6 +124,7 @@ public class Converter {
 			System.exit(0);
 		}
 
+		// read gtfs
 		GtfsReader reader = new GtfsReader();
 		// the inputPath can be the path of decompressed folder or of the ZIP
 		// file
@@ -137,8 +155,7 @@ public class Converter {
 		Collection<StopTime> stopTimes = store.getAllStopTimes();
 		removeUselessStopTime(stopTimes, usefulTrips);
 
-		// arrange Route, Trip and StopTime elements in a top to bottom
-		// hierarchy manner
+		// arrange Route, Trip and StopTime elements in a top to bottom manner
 		HashMap<Route, HashMap<Trip, ArrayList<StopTime>>> top2BottomStructure = new HashMap<Route, HashMap<Trip, ArrayList<StopTime>>>();
 		obtainTop2BottomStructure(top2BottomStructure, stopTimes);
 
@@ -169,15 +186,33 @@ public class Converter {
 		Collection<Stop> stops = store.getAllStops();
 		HashMap<String, Coord> stopMap = new HashMap<String, Coord>();
 		buildStopMap(stops, stopMap);
+		
 		// deal with schedules out of the given location boundaries
 		constrainOutOfBound(boundaries, stopMap, routeSchedules);
+		
 		// exclude stops out of boundaries
 		excludeOutBoundStop(boundaries, stopMap);
 		
 		// convert vehicle schedules to JSON file
-		writeToJSONFile(routeSchedules, SCHEDULE_FILE_NAME);
+		IOUtil.writeToJSONFile(routeSchedules, SCHEDULE_FILE_NAME);
+		
+		if(options.has("v")){
+			// offset all the stops
+			offsetCoordsInCollection(stopMap.values(), x_offset, y_offset);
+		}
+		
 		// convert stop list to JSON file
-		writeToJSONFile(stopMap, STOP_FILE_NAME);
+		IOUtil.writeToJSONFile(stopMap, STOP_FILE_NAME);
+		// extract coordinates from stop list to WKT file
+		IOUtil.writeToWKTPoint(stopMap, WKT_STOP_FILE_NAME);
+	}
+
+	public static void offsetCoordsInCollection(Collection<Coord> values, double x_offset, double y_offset) {
+		Iterator<Coord> it = values.iterator();
+		while (it.hasNext()) {
+			Coord c = it.next();
+			c.translate(x_offset, y_offset);
+		}
 	}
 
 	public static void excludeOutBoundStop(double[] boundaries,
@@ -373,21 +408,6 @@ public class Converter {
 			return true;
 		} else {
 			return false;
-		}
-	}
-
-	public static void writeToJSONFile(Object object,
-			String filePath) {
-		ObjectMapper mapper = new ObjectMapper();
-		try {
-			mapper.writerWithDefaultPrettyPrinter().writeValue(
-					new File(filePath), object);
-		} catch (JsonGenerationException e) {
-			e.printStackTrace();
-		} catch (JsonMappingException e) {
-			e.printStackTrace();
-		} catch (IOException e) {
-			e.printStackTrace();
 		}
 	}
 

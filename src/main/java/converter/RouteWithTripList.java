@@ -1,4 +1,4 @@
-package datastructure;
+package converter;
 
 import java.util.HashSet;
 import java.util.List;
@@ -6,6 +6,7 @@ import java.util.List;
 import movement.schedule.VehicleSchedule;
 
 import org.onebusaway.gtfs.model.Route;
+
 
 /**
  * 

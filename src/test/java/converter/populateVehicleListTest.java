@@ -9,8 +9,6 @@ import org.onebusaway.gtfs.model.Stop;
 import org.onebusaway.gtfs.model.StopTime;
 import org.onebusaway.gtfs.model.Trip;
 
-import datastructure.RouteWithTripList;
-import datastructure.TripWithStopTimeList;
 
 import junit.framework.TestCase;
 
