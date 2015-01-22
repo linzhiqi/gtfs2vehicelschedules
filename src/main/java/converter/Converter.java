@@ -68,7 +68,7 @@ public class Converter {
 
 	public static void main(String[] args) throws IOException {
 		// parsing input options
-		String usageStr = "usage: <-i gtfs_path> <-b xmin,ymin,xmax,ymax> " +
+		String usageStr = "usage: <-i gtfs_path> [-b xmin,ymin,xmax,ymax] " +
 				"[-s max_speed] [-d max_distance] [-v x_offset,y_offset] ";
 		String inputPath = null;
 		double[] boundaries = null;
@@ -84,10 +84,7 @@ public class Converter {
 			inputPath = (String) options.valueOf("i");
 		}
 		
-		if (!options.has("b")) {
-			System.out.print(usageStr);
-			System.exit(-1);
-		} else {
+		if (options.has("b")) {
 			String boundStr = (String) options.valueOf("b");
 			String[] bounds = boundStr.split(",");
 			if (bounds.length != 4) {
@@ -187,11 +184,14 @@ public class Converter {
 		HashMap<String, Coord> stopMap = new HashMap<String, Coord>();
 		buildStopMap(stops, stopMap);
 		
-		// deal with schedules out of the given location boundaries
-		constrainOutOfBound(boundaries, stopMap, routeSchedules);
+		if (options.has("b")) {
+			// deal with schedules out of the given location boundaries
+			constrainOutOfBound(boundaries, stopMap, routeSchedules);
 		
-		// exclude stops out of boundaries
-		excludeOutBoundStop(boundaries, stopMap);
+			// exclude stops out of boundaries
+			excludeOutBoundStop(boundaries, stopMap);
+		}
+		
 		
 		// convert vehicle schedules to JSON file
 		IOUtil.writeToJSONFile(routeSchedules, SCHEDULE_FILE_NAME);
