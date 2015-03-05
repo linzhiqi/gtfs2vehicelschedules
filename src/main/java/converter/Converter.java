@@ -1,6 +1,8 @@
 package converter;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -69,12 +71,14 @@ public class Converter {
 	public static void main(String[] args) throws IOException {
 		// parsing input options
 		String usageStr = "usage: <-i gtfs_path> [-b xmin,ymin,xmax,ymax] " +
-				"[-s max_speed] [-d max_distance] [-v x_offset,y_offset] ";
+				"[-s max_speed] [-d max_distance] [-v x_offset,y_offset] [-r route_file]";
 		String inputPath = null;
 		double[] boundaries = null;
 		double x_offset = 0.0;
 		double y_offset = 0.0;
-		OptionParser parser = new OptionParser("i:b:s:d:v:h");
+		String route_file = null;
+		HashSet<String> routesInterested = null;
+		OptionParser parser = new OptionParser("i:b:s:d:v:r:h");
 		OptionSet options = parser.parse(args);
 		
 		if (!options.has("i")) {
@@ -116,6 +120,11 @@ public class Converter {
 		if (options.has("d")) {
 			DISTANCE_MAX = Double.parseDouble((String) options.valueOf("d"));
 		}
+		if (options.has("r")) {
+			route_file = (String) options.valueOf("r");
+			routesInterested = new HashSet<String>();
+			fillSetFromFile(new File(route_file), routesInterested);
+		}
 		if (options.has("h")) {
 			System.out.print(usageStr);
 			System.exit(0);
@@ -142,11 +151,19 @@ public class Converter {
 		Collection<Trip> allTrips = store.getAllTrips();
 		Collection<ServiceCalendar> calendars = store.getAllCalendars();
 		Map<AgencyAndId, ServiceCalendar> calendarMap = getCalendarMap(calendars);
-		HashMap<Route, Integer> route2IntIdMap = new HashMap<Route, Integer>();
+		
 		HashSet<Trip> usefulTrips = new HashSet<Trip>();
-
-		obtainUsefulTrips(allRoutes, allTrips, calendarMap, route2IntIdMap,
-				usefulTrips);
+		
+		HashMap<Route, Integer> route2IntIdMap = new HashMap<Route, Integer>();
+		removeUninterestedRoutes(routesInterested, allRoutes, route2IntIdMap);
+		
+		removeTripsOfUninterestedRoutes(routesInterested, allTrips);
+		
+		// build a map that can answer question "what are the services that has most trips for route n on each week day?"
+		HashMap<Route, HashMap<Weekday, ServiceCalendar>> optimisedServiceMap = new HashMap<Route, HashMap<Weekday, ServiceCalendar>>();
+		fillOptimisedServiceMap(optimisedServiceMap, allTrips, calendarMap);
+		
+		obtainUsefulTrips2(allRoutes, allTrips, calendarMap, usefulTrips, optimisedServiceMap);
 
 		// remove StopTime objects belongs to useless trips
 		Collection<StopTime> stopTimes = store.getAllStopTimes();
@@ -184,27 +201,155 @@ public class Converter {
 		HashMap<String, Coord> stopMap = new HashMap<String, Coord>();
 		buildStopMap(stops, stopMap);
 		
+		if(options.has("v")){
+			// offset all the stops
+			offsetCoordsInCollection(stopMap.values(), x_offset, y_offset);
+		}
+		
 		if (options.has("b")) {
 			// deal with schedules out of the given location boundaries
 			constrainOutOfBound(boundaries, stopMap, routeSchedules);
 		
 			// exclude stops out of boundaries
 			excludeOutBoundStop(boundaries, stopMap);
-		}
-		
+		}	
 		
 		// convert vehicle schedules to JSON file
 		IOUtil.writeToJSONFile(routeSchedules, SCHEDULE_FILE_NAME);
-		
-		if(options.has("v")){
-			// offset all the stops
-			offsetCoordsInCollection(stopMap.values(), x_offset, y_offset);
-		}
 		
 		// convert stop list to JSON file
 		IOUtil.writeToJSONFile(stopMap, STOP_FILE_NAME);
 		// extract coordinates from stop list to WKT file
 		IOUtil.writeToWKTPoint(stopMap, WKT_STOP_FILE_NAME);
+	}
+
+	static class NumOfTripsOfService {
+		int numOfTrips;
+		ServiceCalendar service;
+		
+		public NumOfTripsOfService(ServiceCalendar service){
+			this.service = service;
+			this.numOfTrips = 0;
+		}
+	}
+	
+	public static void fillOptimisedServiceMap(
+			HashMap<Route, HashMap<Weekday, ServiceCalendar>> optimisedServiceMap,
+			Collection<Trip> allTrips,
+			Map<AgencyAndId, ServiceCalendar> calendarMap) {
+		HashMap<Route, HashMap<Weekday, ArrayList<NumOfTripsOfService>>> tempMap = new HashMap<Route, 
+				HashMap<Weekday, ArrayList<NumOfTripsOfService>>>();
+		for(Trip t : allTrips){
+			Route r = t.getRoute();
+			ServiceCalendar serviceOfTheTrip = calendarMap.get(t.getServiceId());
+			Boolean[] flags = getWeekDayFlags(serviceOfTheTrip);
+			if(tempMap.containsKey(r)){
+				HashMap<Weekday, ArrayList<NumOfTripsOfService>> mapOfRoute = tempMap.get(r);			
+				
+				for (Weekday day : Weekday.values()) {
+					if (flags[day.ordinal()]) {
+						if(mapOfRoute.containsKey(day)){
+							ArrayList<NumOfTripsOfService> list = mapOfRoute.get(day);
+							boolean isContained = false;
+							for(NumOfTripsOfService s : list){
+								if(s.service.equals(serviceOfTheTrip)){
+									s.numOfTrips ++;
+									isContained = true;
+									break;
+								}
+							}
+							if(!isContained){
+								NumOfTripsOfService newService = new NumOfTripsOfService(serviceOfTheTrip);
+								newService.numOfTrips = 1;
+								list.add(newService);
+							}
+						}else{
+							ArrayList<NumOfTripsOfService> newList = new ArrayList<NumOfTripsOfService>();
+							mapOfRoute.put(day, newList);
+						}
+					}
+				}
+				
+			}else{
+				HashMap<Weekday, ArrayList<NumOfTripsOfService>> newSubMap = new HashMap<Weekday, ArrayList<NumOfTripsOfService>>();
+				tempMap.put(r, newSubMap);
+			}
+		}
+		
+		Collection<Entry<Route, HashMap<Weekday, ArrayList<NumOfTripsOfService>>>> mapValues = tempMap.entrySet();
+		for(Entry<Route, HashMap<Weekday, ArrayList<NumOfTripsOfService>>> map : mapValues){
+			HashMap<Weekday, ServiceCalendar> subMap = new HashMap<Weekday, ServiceCalendar>();
+			optimisedServiceMap.put(map.getKey(), subMap);
+			Collection<Entry<Weekday, ArrayList<NumOfTripsOfService>>> lists = map.getValue().entrySet();
+			for(Entry<Weekday, ArrayList<NumOfTripsOfService>> list : lists){
+				int maxNum = 0;
+				NumOfTripsOfService bestService = null;
+				for(NumOfTripsOfService service : list.getValue()){
+					if(service.numOfTrips>maxNum){
+						maxNum = service.numOfTrips;
+						bestService = service;
+					}
+				}
+				assert bestService!=null;
+				subMap.put(list.getKey(), bestService.service);
+			}
+		}
+	}
+
+	public static void removeTripsOfUninterestedRoutes(
+			HashSet<String> routesInterested, Collection<Trip> allTrips) {
+		int ct = 0;
+		Iterator<Trip> it = allTrips.iterator();
+		while(it.hasNext()){
+			Trip t = it.next();
+			String routeId = t.getRoute().getId().getId();
+			if(!routesInterested.contains(routeId)) {
+				ct ++;
+				it.remove();
+			}
+		}
+		System.out.println(ct + " trips of uninterested routes are deleted.");
+	}
+
+	public static void removeUninterestedRoutes(Set<String> routesInterested,
+			Collection<Route> allRoutes, HashMap<Route, Integer> route2IntIdMap) {
+		int ct0 = 0;
+		int ct1 = 0;
+		int routeIntId = 0;
+		int numOfRoutesBefore = allRoutes.size();
+		Iterator<Route> it = allRoutes.iterator();
+		while(it.hasNext()){
+			Route r = it.next();
+			String routeId = r.getId().getId();
+			if(routesInterested!=null && !routesInterested.isEmpty() && !routesInterested.contains(routeId)) {
+				ct0 ++;
+				it.remove();
+				continue;
+			}
+			int routeType = r.getType();
+			if (routeType != Converter.BUS_TYPE
+					&& routeType != Converter.METRO_TYPE
+					&& routeType != Converter.RAIL_TYPE
+					&& routeType != Converter.TRAM_TYPE) {
+				ct1 ++;
+				it.remove();
+				continue;
+			}
+			route2IntIdMap.put(r, routeIntId);
+			routeIntId++;
+		}
+		System.out.println(ct0 + " uninterested routes are deleted.");
+		System.out.println(ct1 + " routes of uninterested type are deleted.");
+		System.out.println("numOfRoutes (before/after): " +  numOfRoutesBefore + "/" + routeIntId);
+	}
+
+	private static void fillSetFromFile(File file, Set<String> set) throws IOException {
+		BufferedReader reader = new BufferedReader(new FileReader(file));
+		String line = null;
+		while((line = reader.readLine()) != null){
+			set.add(line);
+		}
+		reader.close();
 	}
 
 	public static void offsetCoordsInCollection(Collection<Coord> values, double x_offset, double y_offset) {
@@ -741,14 +886,6 @@ public class Converter {
 		int numOfTrips = allTrips.size();
 		int routeIntId = 0;
 		for (Route route : allRoutes) {
-			// exclude routes with not interested transport types
-			int routeType = route.getType();
-			if (routeType != Converter.BUS_TYPE
-					&& routeType != Converter.METRO_TYPE
-					&& routeType != Converter.RAIL_TYPE
-					&& routeType != Converter.TRAM_TYPE) {
-				continue;
-			}
 
 			route2IntIdMap.put(route, routeIntId);
 			routeIntId++;
@@ -759,6 +896,9 @@ public class Converter {
 			while (it.hasNext()) {
 				Trip trip = it.next();
 				if (trip.getRoute().equals(route)) {
+					if(trip.getId().getId().equals("1009_20141226_Ma_1_0600")){
+						System.out.println("");
+					}
 					ServiceCalendar calendar = calendarMap.get(trip
 							.getServiceId());
 					String record = calendar.getStartDate().getAsString()
@@ -786,6 +926,40 @@ public class Converter {
 		}
 		System.out.println("\nafter clearup" + "\troutes:" + routeIntId + "/"
 				+ numOfRoutes + "\ttrips:" + usefulTrips.size() + "/"
+				+ numOfTrips);
+	}
+	
+	public static void obtainUsefulTrips2(Collection<Route> allRoutes,
+			Collection<Trip> allTrips,
+			Map<AgencyAndId, ServiceCalendar> calendarMap,
+			HashSet<Trip> usefulTrips, HashMap<Route, HashMap<Weekday, ServiceCalendar>> targetedServiceMap) {
+
+		int numOfTrips = allTrips.size();
+
+		// only select trips of selected services
+		Iterator<Trip> it = allTrips.iterator();
+		while (it.hasNext()) {
+			Trip trip = it.next();
+			ServiceCalendar service = calendarMap.get(trip
+					.getServiceId());
+			Route r = trip.getRoute();		
+			HashMap<Weekday, ServiceCalendar> serviceMap = targetedServiceMap.get(r);
+					
+			Boolean[] flags = getWeekDayFlags(service);
+
+			for (Weekday day : Weekday.values()) {
+				if (flags[day.ordinal()]) {
+					ServiceCalendar targetedService = serviceMap.get(day);
+					if(targetedService.equals(service)){
+						usefulTrips.add(trip);
+						break;
+					}
+				}
+			}
+
+		}
+
+		System.out.println("\nafter obtainUsefulTrips2" + "\ttrips:" + usefulTrips.size() + "/"
 				+ numOfTrips);
 	}
 
