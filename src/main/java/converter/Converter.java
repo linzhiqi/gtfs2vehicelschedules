@@ -63,6 +63,7 @@ public class Converter {
 	public static final String SCHEDULE_FILE_NAME = "schedules.json";
 	public static final String STOP_FILE_NAME = "stops.json";
 	private static final String WKT_STOP_FILE_NAME = "stops.wkt";
+	private static final String ROUTE_ID_MAPPING_FILE_NAME = "route_id_mapping.json";
 
 	public enum Weekday {
 		Mon, Tue, Wed, Thu, Fri, Sat, Sun
@@ -156,6 +157,8 @@ public class Converter {
 		
 		HashMap<Route, Integer> route2IntIdMap = new HashMap<Route, Integer>();
 		removeUninterestedRoutes(routesInterested, allRoutes, route2IntIdMap);
+		//output file containing mapping from real route-id to numeric id
+		IOUtil.outputRouteIdMapping(route2IntIdMap, ROUTE_ID_MAPPING_FILE_NAME);
 		
 		removeTripsOfUninterestedRoutes(routesInterested, allTrips);
 		
@@ -164,7 +167,8 @@ public class Converter {
 		fillOptimisedServiceMap(optimisedServiceMap, allTrips, calendarMap);
 		
 		obtainUsefulTrips2(allRoutes, allTrips, calendarMap, usefulTrips, optimisedServiceMap);
-
+		//obtainUsefulTrips(allRoutes, allTrips, calendarMap, usefulTrips);
+		
 		// remove StopTime objects belongs to useless trips
 		Collection<StopTime> stopTimes = store.getAllStopTimes();
 		removeUselessStopTime(stopTimes, usefulTrips);
@@ -290,8 +294,11 @@ public class Converter {
 						bestService = service;
 					}
 				}
-				assert bestService!=null;
-				subMap.put(list.getKey(), bestService.service);
+
+				if(bestService!=null){
+					subMap.put(list.getKey(), bestService.service);
+				}
+				
 			}
 		}
 	}
@@ -303,9 +310,19 @@ public class Converter {
 		while(it.hasNext()){
 			Trip t = it.next();
 			String routeId = t.getRoute().getId().getId();
-			if(!routesInterested.contains(routeId)) {
+			if(routesInterested!=null && !routesInterested.isEmpty() && !routesInterested.contains(routeId)) {
 				ct ++;
 				it.remove();
+				continue;
+			}
+			int routeType = t.getRoute().getType();
+			if(!(routeType==Converter.BUS_TYPE ||
+					routeType==Converter.METRO_TYPE ||
+					routeType==Converter.RAIL_TYPE ||
+					routeType==Converter.TRAM_TYPE)){
+				ct ++;
+				it.remove();
+				continue;
 			}
 		}
 		System.out.println(ct + " trips of uninterested routes are deleted.");
@@ -327,10 +344,10 @@ public class Converter {
 				continue;
 			}
 			int routeType = r.getType();
-			if (routeType != Converter.BUS_TYPE
-					&& routeType != Converter.METRO_TYPE
-					&& routeType != Converter.RAIL_TYPE
-					&& routeType != Converter.TRAM_TYPE) {
+			if (!(routeType==Converter.BUS_TYPE ||
+					routeType==Converter.METRO_TYPE ||
+					routeType==Converter.RAIL_TYPE ||
+					routeType==Converter.TRAM_TYPE)) {
 				ct1 ++;
 				it.remove();
 				continue;
@@ -492,7 +509,7 @@ public class Converter {
 							stopsDeleted ++;
 							continue;
 						}
-						if (i < firstInBoundIndex || i >= i + numOfInBoundStop) {
+						if (i < firstInBoundIndex || i > firstInBoundIndex + numOfInBoundStop -1) {
 							stopIt.remove();
 							stopsDeleted ++;
 						} else {
@@ -880,14 +897,13 @@ public class Converter {
 	public static void obtainUsefulTrips(Collection<Route> allRoutes,
 			Collection<Trip> allTrips,
 			Map<AgencyAndId, ServiceCalendar> calendarMap,
-			HashMap<Route, Integer> route2IntIdMap, HashSet<Trip> usefulTrips) {
+			HashSet<Trip> usefulTrips) {
 
 		int numOfRoutes = allRoutes.size();
 		int numOfTrips = allTrips.size();
 		int routeIntId = 0;
 		for (Route route : allRoutes) {
 
-			route2IntIdMap.put(route, routeIntId);
 			routeIntId++;
 			// exclude trips for the same week day but belongs to calendar
 			// service of different duration
@@ -950,7 +966,7 @@ public class Converter {
 			for (Weekday day : Weekday.values()) {
 				if (flags[day.ordinal()]) {
 					ServiceCalendar targetedService = serviceMap.get(day);
-					if(targetedService.equals(service)){
+					if(targetedService!=null && targetedService.equals(service)){
 						usefulTrips.add(trip);
 						break;
 					}

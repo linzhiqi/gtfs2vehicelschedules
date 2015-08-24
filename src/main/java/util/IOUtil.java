@@ -7,13 +7,17 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map.Entry;
+import java.util.Set;
 
 import org.codehaus.jackson.JsonGenerationException;
 import org.codehaus.jackson.JsonParseException;
 import org.codehaus.jackson.map.JsonMappingException;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.type.TypeReference;
+import org.onebusaway.gtfs.model.Route;
 
 
 public class IOUtil {
@@ -99,6 +103,33 @@ public class IOUtil {
 				lineStr = sb.toString();
 				writer.append("LINESTRING (" + lineStr + ")\n");
 			}
+			writer.flush();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} finally {
+			try {
+				writer.close();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+
+	public static void outputRouteIdMapping(
+			HashMap<Route, Integer> route2IntIdMap,
+			String routeIdMappingFileName) {
+		BufferedWriter writer = null;
+		try {
+			writer = new BufferedWriter(new FileWriter(new File(routeIdMappingFileName)));
+			Set<Entry<Route, Integer>> set = route2IntIdMap.entrySet();
+			Iterator<Entry<Route, Integer>> it = set.iterator();
+			writer.append("[real-route-id] -> [numeric id]\n");
+			while(it.hasNext()){
+				Entry<Route, Integer> entry = it.next();		
+				writer.append(entry.getKey().getId().getId() + " -> " + entry.getValue() + "\n");
+			}			
 			writer.flush();
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
